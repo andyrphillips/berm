@@ -1,0 +1,154 @@
+{
+  "format_version": "1.1",
+  "terraform_version": "1.5.0",
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket.compliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "my-compliant-bucket",
+          "tags": {
+            "Environment": "production"
+          }
+        }
+      }
+    },
+    {
+      "address": "aws_s3_bucket_versioning.compliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_versioning",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "my-compliant-bucket",
+          "versioning_configuration": [
+            {
+              "status": "Enabled",
+              "mfa_delete": "Disabled"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "aws_s3_bucket_versioning.non_compliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_versioning",
+      "name": "non_compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "my-noncompliant-bucket",
+          "versioning_configuration": [
+            {
+              "status": "Disabled",
+              "mfa_delete": "Disabled"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "aws_s3_bucket_public_access_block.compliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_public_access_block",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "my-compliant-bucket",
+          "block_public_acls": true,
+          "block_public_policy": true,
+          "ignore_public_acls": true,
+          "restrict_public_buckets": true
+        }
+      }
+    },
+    {
+      "address": "aws_s3_bucket_public_access_block.non_compliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_public_access_block",
+      "name": "non_compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "my-noncompliant-bucket",
+          "block_public_acls": false,
+          "block_public_policy": false,
+          "ignore_public_acls": false,
+          "restrict_public_buckets": false
+        }
+      }
+    },
+    {
+      "address": "aws_db_instance.compliant",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "identifier": "my-rds-instance",
+          "engine": "postgres",
+          "instance_class": "db.t3.micro",
+          "allocated_storage": 20,
+          "storage_encrypted": true,
+          "backup_retention_period": 7,
+          "skip_final_snapshot": true
+        }
+      }
+    },
+    {
+      "address": "aws_db_instance.non_compliant",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "non_compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "identifier": "my-insecure-rds",
+          "engine": "postgres",
+          "instance_class": "db.t3.micro",
+          "allocated_storage": 20,
+          "storage_encrypted": false,
+          "backup_retention_period": 3,
+          "skip_final_snapshot": true
+        }
+      }
+    },
+    {
+      "address": "aws_instance.deleted",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "deleted",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "ami": "ami-12345",
+          "instance_type": "t2.micro"
+        },
+        "after": null
+      }
+    }
+  ]
+}

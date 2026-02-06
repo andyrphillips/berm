@@ -1,0 +1,210 @@
+"""Tests for Terraform plan loader."""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from berm.loaders.terraform import (
+    TerraformPlanLoadError,
+    get_nested_property,
+    get_resource_by_type,
+    load_terraform_plan,
+)
+
+
+def test_load_terraform_plan(sample_plan_file):
+    """Test loading a Terraform plan file."""
+    resources = load_terraform_plan(str(sample_plan_file))
+
+    # Should load resources (excluding deleted ones)
+    assert len(resources) > 0
+    assert all(isinstance(r, dict) for r in resources)
+
+    # Each resource should have expected keys
+    for resource in resources:
+        assert "address" in resource
+        assert "type" in resource
+        assert "name" in resource
+        assert "values" in resource
+
+
+def test_load_terraform_plan_nonexistent():
+    """Test loading non-existent file."""
+    with pytest.raises(TerraformPlanLoadError, match="does not exist"):
+        load_terraform_plan("/nonexistent/plan.json")
+
+
+def test_load_terraform_plan_not_a_file(tmp_path):
+    """Test loading when path is a directory."""
+    with pytest.raises(TerraformPlanLoadError, match="not a file"):
+        load_terraform_plan(str(tmp_path))
+
+
+def test_load_terraform_plan_invalid_json(tmp_path):
+    """Test loading invalid JSON."""
+    plan_file = tmp_path / "invalid.json"
+    plan_file.write_text("{ invalid json }")
+
+    with pytest.raises(TerraformPlanLoadError, match="Invalid JSON"):
+        load_terraform_plan(str(plan_file))
+
+
+def test_load_terraform_plan_not_object(tmp_path):
+    """Test loading plan that's not a JSON object."""
+    plan_file = tmp_path / "array.json"
+    plan_file.write_text('["not", "an", "object"]')
+
+    with pytest.raises(TerraformPlanLoadError, match="must contain a JSON object"):
+        load_terraform_plan(str(plan_file))
+
+
+def test_load_terraform_plan_excludes_deleted(tmp_path):
+    """Test that deleted resources are excluded."""
+    plan_data = {
+        "resource_changes": [
+            {
+                "address": "aws_s3_bucket.kept",
+                "type": "aws_s3_bucket",
+                "name": "kept",
+                "change": {
+                    "actions": ["create"],
+                    "after": {"bucket": "my-bucket"},
+                },
+            },
+            {
+                "address": "aws_s3_bucket.deleted",
+                "type": "aws_s3_bucket",
+                "name": "deleted",
+                "change": {
+                    "actions": ["delete"],
+                    "before": {"bucket": "old-bucket"},
+                    "after": None,
+                },
+            },
+        ]
+    }
+
+    plan_file = tmp_path / "plan.json"
+    with open(plan_file, "w") as f:
+        json.dump(plan_data, f)
+
+    resources = load_terraform_plan(str(plan_file))
+
+    # Should only include the created resource, not the deleted one
+    assert len(resources) == 1
+    assert resources[0]["address"] == "aws_s3_bucket.kept"
+
+
+def test_load_terraform_plan_excludes_noop(tmp_path):
+    """Test that no-op resources are excluded."""
+    plan_data = {
+        "resource_changes": [
+            {
+                "address": "aws_s3_bucket.changed",
+                "type": "aws_s3_bucket",
+                "name": "changed",
+                "change": {
+                    "actions": ["update"],
+                    "after": {"bucket": "my-bucket"},
+                },
+            },
+            {
+                "address": "aws_s3_bucket.unchanged",
+                "type": "aws_s3_bucket",
+                "name": "unchanged",
+                "change": {
+                    "actions": ["no-op"],
+                    "after": {"bucket": "same-bucket"},
+                },
+            },
+        ]
+    }
+
+    plan_file = tmp_path / "plan.json"
+    with open(plan_file, "w") as f:
+        json.dump(plan_data, f)
+
+    resources = load_terraform_plan(str(plan_file))
+
+    # Should only include the changed resource
+    assert len(resources) == 1
+    assert resources[0]["address"] == "aws_s3_bucket.changed"
+
+
+def test_get_resource_by_type(sample_resources):
+    """Test filtering resources by type."""
+    s3_resources = get_resource_by_type(sample_resources, "aws_s3_bucket")
+    assert len(s3_resources) == 2
+    assert all(r["type"] == "aws_s3_bucket" for r in s3_resources)
+
+    db_resources = get_resource_by_type(sample_resources, "aws_db_instance")
+    assert len(db_resources) == 1
+    assert db_resources[0]["type"] == "aws_db_instance"
+
+    # Non-existent type
+    other_resources = get_resource_by_type(sample_resources, "aws_lambda_function")
+    assert len(other_resources) == 0
+
+
+def test_get_nested_property_simple():
+    """Test getting simple nested properties."""
+    obj = {"a": {"b": {"c": 123}}}
+
+    assert get_nested_property(obj, "a") == {"b": {"c": 123}}
+    assert get_nested_property(obj, "a.b") == {"c": 123}
+    assert get_nested_property(obj, "a.b.c") == 123
+
+
+def test_get_nested_property_missing():
+    """Test getting non-existent properties."""
+    obj = {"a": {"b": 123}}
+
+    assert get_nested_property(obj, "x") is None
+    assert get_nested_property(obj, "a.x") is None
+    assert get_nested_property(obj, "a.b.c") is None
+
+
+def test_get_nested_property_list_index():
+    """Test accessing list elements by index."""
+    obj = {"items": [{"name": "first"}, {"name": "second"}, {"name": "third"}]}
+
+    assert get_nested_property(obj, "items.0") == {"name": "first"}
+    assert get_nested_property(obj, "items.1") == {"name": "second"}
+    assert get_nested_property(obj, "items.0.name") == "first"
+    assert get_nested_property(obj, "items.2.name") == "third"
+
+
+def test_get_nested_property_list_out_of_bounds():
+    """Test accessing list with invalid index."""
+    obj = {"items": [{"name": "only"}]}
+
+    assert get_nested_property(obj, "items.1") is None
+    assert get_nested_property(obj, "items.5") is None
+    assert get_nested_property(obj, "items.-1") is None
+
+
+def test_get_nested_property_empty_path():
+    """Test with empty path."""
+    obj = {"a": 123}
+
+    assert get_nested_property(obj, "") is None
+
+
+def test_get_nested_property_none_object():
+    """Test with None object."""
+    assert get_nested_property(None, "a.b.c") is None
+
+
+def test_get_nested_property_complex():
+    """Test complex nested structure."""
+    obj = {
+        "versioning_configuration": [
+            {"status": "Enabled", "mfa_delete": "Disabled"}
+        ],
+        "tags": {"Environment": "prod", "Team": "platform"},
+    }
+
+    assert get_nested_property(obj, "versioning_configuration.0.status") == "Enabled"
+    assert get_nested_property(obj, "tags.Environment") == "prod"
+    assert get_nested_property(obj, "tags.Team") == "platform"
