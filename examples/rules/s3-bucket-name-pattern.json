@@ -1,0 +1,9 @@
+{
+  "id": "s3-bucket-name-pattern",
+  "name": "S3 bucket names must follow naming convention",
+  "resource_type": "aws_s3_bucket",
+  "severity": "error",
+  "property": "bucket",
+  "regex_match": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+  "message": "S3 bucket {{resource_name}} must use lowercase alphanumeric characters and hyphens only"
+}

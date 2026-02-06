@@ -259,3 +259,212 @@ def test_evaluator_value_coercion():
 
     violations = evaluator.evaluate(rule, resources)
     assert len(violations) == 0
+
+
+def test_evaluator_contains_string():
+    """Test contains operator with string values."""
+    evaluator = SimpleEvaluator()
+
+    rule = Rule(
+        id="test-contains",
+        name="Contains Test",
+        resource_type="aws_s3_bucket",
+        severity="error",
+        property="bucket_name",
+        contains="prod",
+        message="Bucket name must contain 'prod'",
+    )
+
+    # Compliant resource
+    resources_good = [
+        {
+            "address": "aws_s3_bucket.production",
+            "type": "aws_s3_bucket",
+            "name": "production",
+            "values": {"bucket_name": "my-prod-bucket"},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_good)
+    assert len(violations) == 0
+
+    # Non-compliant resource
+    resources_bad = [
+        {
+            "address": "aws_s3_bucket.staging",
+            "type": "aws_s3_bucket",
+            "name": "staging",
+            "values": {"bucket_name": "my-staging-bucket"},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_bad)
+    assert len(violations) == 1
+    assert "contains 'prod'" in violations[0].message
+
+
+def test_evaluator_contains_list():
+    """Test contains operator with list values."""
+    evaluator = SimpleEvaluator()
+
+    rule = Rule(
+        id="test-contains-list",
+        name="Contains List Test",
+        resource_type="aws_resource",
+        severity="error",
+        property="tags",
+        contains="Environment",
+        message="Tags must contain 'Environment'",
+    )
+
+    # Compliant resource
+    resources_good = [
+        {
+            "address": "aws_resource.tagged",
+            "type": "aws_resource",
+            "name": "tagged",
+            "values": {"tags": ["Environment", "Owner", "Project"]},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_good)
+    assert len(violations) == 0
+
+    # Non-compliant resource
+    resources_bad = [
+        {
+            "address": "aws_resource.untagged",
+            "type": "aws_resource",
+            "name": "untagged",
+            "values": {"tags": ["Owner", "Project"]},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_bad)
+    assert len(violations) == 1
+
+
+def test_evaluator_in_list():
+    """Test in operator with list of allowed values."""
+    evaluator = SimpleEvaluator()
+
+    rule = Rule(
+        id="test-in",
+        name="In List Test",
+        resource_type="aws_instance",
+        severity="error",
+        property="instance_type",
+        **{"in": ["t3.micro", "t3.small", "t3.medium"]},
+        message="Instance type must be t3.micro, t3.small, or t3.medium",
+    )
+
+    # Compliant resource
+    resources_good = [
+        {
+            "address": "aws_instance.allowed",
+            "type": "aws_instance",
+            "name": "allowed",
+            "values": {"instance_type": "t3.small"},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_good)
+    assert len(violations) == 0
+
+    # Non-compliant resource
+    resources_bad = [
+        {
+            "address": "aws_instance.forbidden",
+            "type": "aws_instance",
+            "name": "forbidden",
+            "values": {"instance_type": "t3.xlarge"},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_bad)
+    assert len(violations) == 1
+    assert "in [" in violations[0].message
+
+
+def test_evaluator_regex_match():
+    """Test regex_match operator."""
+    evaluator = SimpleEvaluator()
+
+    rule = Rule(
+        id="test-regex",
+        name="Regex Test",
+        resource_type="aws_s3_bucket",
+        severity="error",
+        property="bucket_name",
+        regex_match=r"^[a-z0-9-]+$",
+        message="Bucket name must be lowercase alphanumeric with hyphens only",
+    )
+
+    # Compliant resource
+    resources_good = [
+        {
+            "address": "aws_s3_bucket.valid",
+            "type": "aws_s3_bucket",
+            "name": "valid",
+            "values": {"bucket_name": "my-valid-bucket-123"},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_good)
+    assert len(violations) == 0
+
+    # Non-compliant resource (uppercase)
+    resources_bad = [
+        {
+            "address": "aws_s3_bucket.invalid",
+            "type": "aws_s3_bucket",
+            "name": "invalid",
+            "values": {"bucket_name": "MyInvalidBucket"},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_bad)
+    assert len(violations) == 1
+    assert "matches pattern" in violations[0].message
+
+
+def test_evaluator_regex_match_complex():
+    """Test regex_match with more complex patterns."""
+    evaluator = SimpleEvaluator()
+
+    # Email validation pattern
+    rule = Rule(
+        id="test-email-regex",
+        name="Email Regex Test",
+        resource_type="aws_resource",
+        severity="error",
+        property="email",
+        regex_match=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
+        message="Must be a valid email address",
+    )
+
+    # Valid email
+    resources_good = [
+        {
+            "address": "aws_resource.valid",
+            "type": "aws_resource",
+            "name": "valid",
+            "values": {"email": "user@example.com"},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_good)
+    assert len(violations) == 0
+
+    # Invalid email
+    resources_bad = [
+        {
+            "address": "aws_resource.invalid",
+            "type": "aws_resource",
+            "name": "invalid",
+            "values": {"email": "not-an-email"},
+        }
+    ]
+
+    violations = evaluator.evaluate(rule, resources_bad)
+    assert len(violations) == 1

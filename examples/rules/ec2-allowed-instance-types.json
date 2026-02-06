@@ -1,0 +1,9 @@
+{
+  "id": "ec2-allowed-instance-types",
+  "name": "EC2 instances must use approved instance types",
+  "resource_type": "aws_instance",
+  "severity": "error",
+  "property": "instance_type",
+  "in": ["t3.micro", "t3.small", "t3.medium", "t3.large"],
+  "message": "EC2 instance {{resource_name}} must use an approved instance type (t3.micro/small/medium/large)"
+}

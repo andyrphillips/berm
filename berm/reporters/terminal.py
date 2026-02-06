@@ -8,6 +8,7 @@ from rich.table import Table
 from rich.text import Text
 
 from berm.models.violation import Violation
+from berm.security import sanitize_for_output
 
 
 class TerminalReporter:
@@ -75,24 +76,30 @@ class TerminalReporter:
         self.console.print(f"[bold {color}]{title} ({len(violations)}):[/bold {color}]")
         self.console.print()
 
-        # Create table
+        # Create table with row separation
         table = Table(
             show_header=True,
             header_style=f"bold {color}",
             border_style=color,
             padding=(0, 1),
+            show_lines=True,  # Add lines between rows for clear separation
         )
 
         table.add_column("Resource", style="cyan", no_wrap=False)
         table.add_column("Rule", style="white", no_wrap=False)
         table.add_column("Message", style="white", no_wrap=False)
 
-        # Add rows
+        # Add rows with sanitized content
         for violation in violations:
+            # Sanitize for terminal output to prevent ANSI injection
+            resource_name = sanitize_for_output(violation.resource_name, context="terminal")
+            rule_name = sanitize_for_output(violation.rule_name, context="terminal")
+            message = sanitize_for_output(violation.message, context="terminal")
+
             table.add_row(
-                violation.resource_name,
-                violation.rule_name,
-                violation.message,
+                resource_name,
+                rule_name,
+                message,
             )
 
         self.console.print(table)

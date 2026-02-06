@@ -1,7 +1,9 @@
 """Rule model for policy definitions."""
 
-from typing import Literal
-from pydantic import BaseModel, Field, field_validator
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from berm.security import validate_property_path
 
 
 class Rule(BaseModel):
@@ -10,7 +12,8 @@ class Rule(BaseModel):
     Rules are defined in JSON format and specify what properties resources
     must have to comply with organizational policies.
 
-    Example:
+    Examples:
+        Equality check:
         {
             "id": "s3-versioning-enabled",
             "name": "S3 buckets must have versioning enabled",
@@ -19,6 +22,27 @@ class Rule(BaseModel):
             "property": "versioning.enabled",
             "equals": true,
             "message": "S3 bucket {{resource_name}} must have versioning enabled"
+        }
+
+        Numeric comparison:
+        {
+            "id": "rds-backup-retention-minimum",
+            "name": "RDS instances should have minimum backup retention",
+            "resource_type": "aws_db_instance",
+            "severity": "warning",
+            "property": "backup_retention_period",
+            "greater_than_or_equal": 7,
+            "message": "RDS instance {{resource_name}} should have at least 7 days backup retention"
+        }
+
+        Forbidden resource (enforce module usage):
+        {
+            "id": "s3-use-module-only",
+            "name": "S3 buckets must use approved module",
+            "resource_type": "aws_s3_bucket",
+            "severity": "error",
+            "resource_forbidden": true,
+            "message": "Direct use of aws_s3_bucket is not allowed. Use module.s3_bucket instead"
         }
     """
 
@@ -45,15 +69,58 @@ class Rule(BaseModel):
         description="Severity level: 'error' blocks deployment, 'warning' is advisory",
     )
 
-    property: str = Field(
-        ...,
-        description="Dot-notation path to the property to check (e.g., 'versioning.enabled')",
+    property: Optional[str] = Field(
+        None,
+        description="Dot-notation path to the property to check (e.g., 'versioning.enabled'). Not required for resource_forbidden rules.",
         min_length=1,
     )
 
-    equals: bool | str | int | float | None = Field(
-        ...,
+    # Rule type: forbidden resource (blocks all usage of a resource type)
+    resource_forbidden: Optional[bool] = Field(
+        None,
+        description="If true, any usage of this resource_type is a violation (for enforcing module usage)",
+    )
+
+    # Comparison operators (exactly one must be specified for property-based rules)
+    equals: Optional[bool | str | int | float | None] = Field(
+        None,
         description="Expected value that the property should equal",
+    )
+
+    greater_than: Optional[int | float] = Field(
+        None,
+        description="Property value must be greater than this number",
+    )
+
+    greater_than_or_equal: Optional[int | float] = Field(
+        None,
+        description="Property value must be greater than or equal to this number",
+    )
+
+    less_than: Optional[int | float] = Field(
+        None,
+        description="Property value must be less than this number",
+    )
+
+    less_than_or_equal: Optional[int | float] = Field(
+        None,
+        description="Property value must be less than or equal to this number",
+    )
+
+    contains: Optional[str] = Field(
+        None,
+        description="Property value (string or list) must contain this substring/element",
+    )
+
+    in_list: Optional[List[bool | str | int | float | None]] = Field(
+        None,
+        description="Property value must be one of the values in this list",
+        alias="in",
+    )
+
+    regex_match: Optional[str] = Field(
+        None,
+        description="Property value must match this regular expression pattern",
     )
 
     message: str = Field(
@@ -70,16 +137,93 @@ class Rule(BaseModel):
             raise ValueError(f"Severity must be 'error' or 'warning', got: {v}")
         return v
 
-    def format_message(self, resource_name: str) -> str:
+    @field_validator("property")
+    @classmethod
+    def validate_property_path_format(cls, v: Optional[str]) -> Optional[str]:
+        """Validate property path format for security."""
+        if v is not None:
+            try:
+                validate_property_path(v)
+            except Exception as e:
+                raise ValueError(f"Invalid property path: {e}")
+        return v
+
+    @model_validator(mode="after")
+    def validate_comparison_operator(self) -> "Rule":
+        """Ensure exactly one comparison operator is specified, or resource_forbidden is set."""
+        # Check if this is a forbidden resource rule
+        if self.resource_forbidden is True:
+            # For forbidden resources, property and operators are not needed
+            if self.property is not None:
+                raise ValueError(
+                    "resource_forbidden rules should not specify a property"
+                )
+            # All comparison operators should be None
+            if any([
+                self.equals is not None,
+                self.greater_than is not None,
+                self.greater_than_or_equal is not None,
+                self.less_than is not None,
+                self.less_than_or_equal is not None,
+                self.contains is not None,
+                self.in_list is not None,
+                self.regex_match is not None,
+            ]):
+                raise ValueError(
+                    "resource_forbidden rules should not specify comparison operators"
+                )
+            return self
+
+        # For property-based rules, ensure property is specified
+        if self.property is None:
+            raise ValueError(
+                "Non-forbidden resource rules must specify a property to check"
+            )
+
+        # Count non-None operators (note: equals can be None as a valid value)
+        specified = [
+            op for op in [
+                self.equals is not None,
+                self.greater_than is not None,
+                self.greater_than_or_equal is not None,
+                self.less_than is not None,
+                self.less_than_or_equal is not None,
+                self.contains is not None,
+                self.in_list is not None,
+                self.regex_match is not None,
+            ] if op
+        ]
+
+        if len(specified) == 0:
+            raise ValueError(
+                "Rule must specify exactly one comparison operator: "
+                "equals, greater_than, greater_than_or_equal, less_than, less_than_or_equal, "
+                "contains, in, or regex_match"
+            )
+
+        if len(specified) > 1:
+            raise ValueError(
+                "Rule must specify only one comparison operator, found multiple"
+            )
+
+        return self
+
+    def format_message(self, resource_name: str, output_context: str = "terminal") -> str:
         """Format the rule message with resource context.
 
         Args:
             resource_name: Name of the resource that violated the rule
+            output_context: Output context for sanitization ("terminal", "github", "json")
 
         Returns:
-            Formatted message with template variables replaced
+            Formatted message with template variables replaced and sanitized
         """
-        return self.message.replace("{{resource_name}}", resource_name)
+        from berm.security import sanitize_for_output
+
+        # Sanitize resource name to prevent injection attacks
+        safe_resource_name = sanitize_for_output(resource_name, context=output_context)
+
+        return self.message.replace("{{resource_name}}", safe_resource_name)
 
     def __str__(self) -> str:
         """String representation of the rule."""

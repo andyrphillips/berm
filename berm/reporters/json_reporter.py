@@ -4,6 +4,7 @@ import json
 from typing import List
 
 from berm.models.violation import Violation
+from berm.security import sanitize_for_output
 
 
 class JSONReporter:
@@ -19,17 +20,18 @@ class JSONReporter:
         Args:
             violations: List of violations to report
         """
-        # Convert violations to dictionaries
+        # Convert violations to dictionaries with sanitized content
         violations_data = []
         for violation in violations:
+            # Sanitize for JSON context (though json.dumps handles most escaping)
             violations_data.append(
                 {
-                    "rule_id": violation.rule_id,
-                    "rule_name": violation.rule_name,
-                    "resource_name": violation.resource_name,
-                    "resource_type": violation.resource_type,
+                    "rule_id": sanitize_for_output(violation.rule_id, context="json"),
+                    "rule_name": sanitize_for_output(violation.rule_name, context="json"),
+                    "resource_name": sanitize_for_output(violation.resource_name, context="json"),
+                    "resource_type": sanitize_for_output(violation.resource_type, context="json"),
                     "severity": violation.severity,
-                    "message": violation.message,
+                    "message": sanitize_for_output(violation.message, context="json"),
                     "location": violation.location,
                 }
             )

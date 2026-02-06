@@ -1,8 +1,9 @@
 """Loader for Terraform plan JSON files."""
 
 import json
-from pathlib import Path
 from typing import Any, Dict, List
+
+from berm.security import SecurityError, MAX_ARRAY_INDEX
 
 
 class TerraformPlanLoadError(Exception):
@@ -11,7 +12,7 @@ class TerraformPlanLoadError(Exception):
     pass
 
 
-def load_terraform_plan(plan_path: str) -> List[Dict[str, Any]]:
+def load_terraform_plan(plan_path: str, _allow_absolute: bool = False) -> List[Dict[str, Any]]:
     """Load and parse a Terraform plan JSON file.
 
     Extracts resource changes from the plan and normalizes them for evaluation.
@@ -19,6 +20,7 @@ def load_terraform_plan(plan_path: str) -> List[Dict[str, Any]]:
 
     Args:
         plan_path: Path to Terraform plan JSON file (output of 'terraform show -json')
+        _allow_absolute: Internal parameter for testing - allows absolute paths
 
     Returns:
         List of resource dictionaries with normalized structure:
@@ -36,21 +38,32 @@ def load_terraform_plan(plan_path: str) -> List[Dict[str, Any]]:
         TerraformPlanLoadError: If file doesn't exist, isn't valid JSON,
                                or doesn't have expected structure
     """
-    path = Path(plan_path)
+    # Validate and sanitize the path (prevents path traversal, checks file size)
+    try:
+        from berm.security import validate_safe_path, validate_file_size, validate_json_depth, ALLOWED_PLAN_EXTENSIONS
 
-    # Validate file exists
-    if not path.exists():
-        raise TerraformPlanLoadError(f"Plan file does not exist: {plan_path}")
-
-    if not path.is_file():
-        raise TerraformPlanLoadError(f"Plan path is not a file: {plan_path}")
+        path = validate_safe_path(
+            plan_path,
+            must_exist=True,
+            allowed_extensions=ALLOWED_PLAN_EXTENSIONS,
+            allow_absolute=_allow_absolute,
+        )
+        validate_file_size(path)
+    except (SecurityError, ValueError) as e:
+        raise TerraformPlanLoadError(f"Security validation failed: {e}")
 
     # Load and parse JSON
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # Use utf-8-sig to handle UTF-8 BOM if present (common in Windows)
+        with open(path, "r", encoding="utf-8-sig") as f:
             plan_data = json.load(f)
+
+        # Validate JSON depth to prevent DoS via deeply nested structures
+        validate_json_depth(plan_data)
     except json.JSONDecodeError as e:
         raise TerraformPlanLoadError(f"Invalid JSON in plan file: {e}")
+    except SecurityError as e:
+        raise TerraformPlanLoadError(f"Security validation failed: {e}")
     except Exception as e:
         raise TerraformPlanLoadError(f"Error reading plan file: {e}")
 
@@ -157,6 +170,16 @@ def get_nested_property(obj: Dict[str, Any], path: str) -> Any:
     if not obj or not path:
         return None
 
+    # Security: validate path before traversal
+    from berm.security import validate_property_path
+
+    try:
+        validate_property_path(path)
+    except (ValueError, SecurityError):
+        # Invalid property path - return None instead of raising
+        # This allows graceful handling of malformed rules
+        return None
+
     parts = path.split(".")
     current = obj
 
@@ -168,7 +191,10 @@ def get_nested_property(obj: Dict[str, Any], path: str) -> Any:
         if isinstance(current, list):
             try:
                 index = int(part)
-                if 0 <= index < len(current):
+                # Security: prevent array index DoS with excessively large indices
+                if index < 0 or index >= MAX_ARRAY_INDEX:
+                    return None
+                if index < len(current):
                     current = current[index]
                 else:
                     return None

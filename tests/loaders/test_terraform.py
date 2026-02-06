@@ -15,7 +15,7 @@ from berm.loaders.terraform import (
 
 def test_load_terraform_plan(sample_plan_file):
     """Test loading a Terraform plan file."""
-    resources = load_terraform_plan(str(sample_plan_file))
+    resources = load_terraform_plan(str(sample_plan_file), _allow_absolute=True)
 
     # Should load resources (excluding deleted ones)
     assert len(resources) > 0
@@ -32,13 +32,16 @@ def test_load_terraform_plan(sample_plan_file):
 def test_load_terraform_plan_nonexistent():
     """Test loading non-existent file."""
     with pytest.raises(TerraformPlanLoadError, match="does not exist"):
-        load_terraform_plan("/nonexistent/plan.json")
+        load_terraform_plan("/nonexistent/plan.json", _allow_absolute=True)
 
 
 def test_load_terraform_plan_not_a_file(tmp_path):
     """Test loading when path is a directory."""
+    # Create a .json file that is actually a directory
+    fake_file = tmp_path / "fake.json"
+    fake_file.mkdir()
     with pytest.raises(TerraformPlanLoadError, match="not a file"):
-        load_terraform_plan(str(tmp_path))
+        load_terraform_plan(str(fake_file), _allow_absolute=True)
 
 
 def test_load_terraform_plan_invalid_json(tmp_path):
@@ -47,7 +50,7 @@ def test_load_terraform_plan_invalid_json(tmp_path):
     plan_file.write_text("{ invalid json }")
 
     with pytest.raises(TerraformPlanLoadError, match="Invalid JSON"):
-        load_terraform_plan(str(plan_file))
+        load_terraform_plan(str(plan_file), _allow_absolute=True)
 
 
 def test_load_terraform_plan_not_object(tmp_path):
@@ -56,7 +59,7 @@ def test_load_terraform_plan_not_object(tmp_path):
     plan_file.write_text('["not", "an", "object"]')
 
     with pytest.raises(TerraformPlanLoadError, match="must contain a JSON object"):
-        load_terraform_plan(str(plan_file))
+        load_terraform_plan(str(plan_file), _allow_absolute=True)
 
 
 def test_load_terraform_plan_excludes_deleted(tmp_path):
@@ -89,7 +92,7 @@ def test_load_terraform_plan_excludes_deleted(tmp_path):
     with open(plan_file, "w") as f:
         json.dump(plan_data, f)
 
-    resources = load_terraform_plan(str(plan_file))
+    resources = load_terraform_plan(str(plan_file), _allow_absolute=True)
 
     # Should only include the created resource, not the deleted one
     assert len(resources) == 1
@@ -125,7 +128,7 @@ def test_load_terraform_plan_excludes_noop(tmp_path):
     with open(plan_file, "w") as f:
         json.dump(plan_data, f)
 
-    resources = load_terraform_plan(str(plan_file))
+    resources = load_terraform_plan(str(plan_file), _allow_absolute=True)
 
     # Should only include the changed resource
     assert len(resources) == 1

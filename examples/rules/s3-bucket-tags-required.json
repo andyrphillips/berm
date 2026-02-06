@@ -1,0 +1,9 @@
+{
+  "id": "s3-bucket-tags-required",
+  "name": "S3 buckets must have Environment tag",
+  "resource_type": "aws_s3_bucket",
+  "severity": "warning",
+  "property": "tags",
+  "contains": "Environment",
+  "message": "S3 bucket {{resource_name}} should have an 'Environment' tag"
+}

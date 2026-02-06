@@ -11,7 +11,7 @@ from berm.models.rule import Rule
 
 def test_load_rules_from_directory(temp_rules_dir):
     """Test loading rules from a directory."""
-    rules = load_rules(str(temp_rules_dir))
+    rules = load_rules(str(temp_rules_dir), _allow_absolute=True)
 
     assert len(rules) == 2
     assert all(isinstance(r, Rule) for r in rules)
@@ -21,7 +21,7 @@ def test_load_rules_from_directory(temp_rules_dir):
 
 def test_load_rules_sorted_by_id(temp_rules_dir):
     """Test that rules are sorted by ID."""
-    rules = load_rules(str(temp_rules_dir))
+    rules = load_rules(str(temp_rules_dir), _allow_absolute=True)
 
     # Should be sorted alphabetically by ID
     rule_ids = [r.id for r in rules]
@@ -31,7 +31,7 @@ def test_load_rules_sorted_by_id(temp_rules_dir):
 def test_load_rules_nonexistent_directory():
     """Test loading from non-existent directory."""
     with pytest.raises(RuleLoadError, match="does not exist"):
-        load_rules("/nonexistent/path")
+        load_rules("/nonexistent/path", _allow_absolute=True)
 
 
 def test_load_rules_not_a_directory(temp_rule_file):
@@ -76,7 +76,7 @@ def test_load_rules_invalid_schema(tmp_path):
         load_rules(str(rules_dir))
 
 
-def test_load_single_rule(temp_rule_file):
+def test_load_single_rule(temp_rule_file, _allow_absolute=True):
     """Test loading a single rule file."""
     rule = load_single_rule(str(temp_rule_file))
 
@@ -88,13 +88,16 @@ def test_load_single_rule(temp_rule_file):
 def test_load_single_rule_nonexistent():
     """Test loading non-existent file."""
     with pytest.raises(RuleLoadError, match="does not exist"):
-        load_single_rule("/nonexistent/file.json")
+        load_single_rule("/nonexistent/file.json", _allow_absolute=True)
 
 
 def test_load_single_rule_not_a_file(tmp_path):
     """Test loading when path is a directory."""
+    # Create a .json file that is actually a directory
+    fake_file = tmp_path / "fake.json"
+    fake_file.mkdir()
     with pytest.raises(RuleLoadError, match="not a file"):
-        load_single_rule(str(tmp_path))
+        load_single_rule(str(fake_file), _allow_absolute=True)
 
 
 def test_load_rules_recursive(tmp_path):

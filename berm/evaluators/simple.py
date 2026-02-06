@@ -1,5 +1,6 @@
 """Simple property-based rule evaluator."""
 
+import re
 from typing import Any, Dict, List
 
 from berm.models.rule import Rule
@@ -10,8 +11,17 @@ from berm.loaders.terraform import get_nested_property
 class SimpleEvaluator:
     """Evaluates rules by checking property values against expected values.
 
-    This evaluator supports basic equality checks on resource properties
-    using dot notation for nested access.
+    Supports multiple comparison operators:
+    - equals: Exact value match
+    - greater_than: Numeric comparison (>)
+    - greater_than_or_equal: Numeric comparison (>=)
+    - less_than: Numeric comparison (<)
+    - less_than_or_equal: Numeric comparison (<=)
+    - contains: String/list contains check
+    - in: Value must be in list
+    - regex_match: Regular expression pattern match
+
+    Uses dot notation for nested property access.
     """
 
     def evaluate(
@@ -57,13 +67,28 @@ class SimpleEvaluator:
         resource_type = resource.get("type", "unknown")
         values = resource.get("values", {})
 
-        # Get the property value using dot notation
+        # Check if this is a forbidden resource rule
+        if rule.resource_forbidden is True:
+            # Any instance of this resource type is a violation
+            # Note: message formatting without context here; will be sanitized by reporters
+            message = rule.format_message(resource_address, output_context="terminal")
+            return Violation(
+                rule_id=rule.id,
+                rule_name=rule.name,
+                resource_name=resource_address,
+                resource_type=resource_type,
+                severity=rule.severity,
+                message=message,
+            )
+
+        # For property-based rules, get the property value using dot notation
         actual_value = get_nested_property(values, rule.property)
 
         # Check if property exists
         if actual_value is None:
             # Property doesn't exist - this is a violation
-            message = rule.format_message(resource_address)
+            # Note: message formatting without context here; will be sanitized by reporters
+            message = rule.format_message(resource_address, output_context="terminal")
             return Violation(
                 rule_id=rule.id,
                 rule_name=rule.name,
@@ -73,22 +98,54 @@ class SimpleEvaluator:
                 message=f"{message} (property '{rule.property}' not found)",
             )
 
-        # Compare actual value to expected value
-        if not self._values_match(actual_value, rule.equals):
-            message = rule.format_message(resource_address)
+        # Determine which comparison to perform
+        if rule.equals is not None:
+            passes = self._check_equals(actual_value, rule.equals)
+            operator_desc = f"equals '{rule.equals}'"
+        elif rule.greater_than is not None:
+            passes = self._check_greater_than(actual_value, rule.greater_than)
+            operator_desc = f"> {rule.greater_than}"
+        elif rule.greater_than_or_equal is not None:
+            passes = self._check_greater_than_or_equal(
+                actual_value, rule.greater_than_or_equal
+            )
+            operator_desc = f">= {rule.greater_than_or_equal}"
+        elif rule.less_than is not None:
+            passes = self._check_less_than(actual_value, rule.less_than)
+            operator_desc = f"< {rule.less_than}"
+        elif rule.less_than_or_equal is not None:
+            passes = self._check_less_than_or_equal(actual_value, rule.less_than_or_equal)
+            operator_desc = f"<= {rule.less_than_or_equal}"
+        elif rule.contains is not None:
+            passes = self._check_contains(actual_value, rule.contains)
+            operator_desc = f"contains '{rule.contains}'"
+        elif rule.in_list is not None:
+            passes = self._check_in_list(actual_value, rule.in_list)
+            operator_desc = f"in {rule.in_list}"
+        elif rule.regex_match is not None:
+            passes = self._check_regex_match(actual_value, rule.regex_match)
+            operator_desc = f"matches pattern '{rule.regex_match}'"
+        else:
+            # Should never happen due to model validation
+            passes = False
+            operator_desc = "unknown"
+
+        if not passes:
+            # Note: message formatting without context here; will be sanitized by reporters
+            message = rule.format_message(resource_address, output_context="terminal")
             return Violation(
                 rule_id=rule.id,
                 rule_name=rule.name,
                 resource_name=resource_address,
                 resource_type=resource_type,
                 severity=rule.severity,
-                message=f"{message} (expected '{rule.equals}', got '{actual_value}')",
+                message=f"{message} (expected {operator_desc}, got '{actual_value}')",
             )
 
         # No violation - resource complies
         return None
 
-    def _values_match(self, actual: Any, expected: Any) -> bool:
+    def _check_equals(self, actual: Any, expected: Any) -> bool:
         """Compare two values for equality.
 
         Handles type coercion for common cases (e.g., "true" vs True).
@@ -132,6 +189,139 @@ class SimpleEvaluator:
 
         # Values don't match
         return False
+
+    def _check_greater_than(self, actual: Any, expected: int | float) -> bool:
+        """Check if actual value is greater than expected.
+
+        Args:
+            actual: The actual value from the resource
+            expected: The expected threshold value
+
+        Returns:
+            True if actual > expected, False otherwise
+        """
+        try:
+            actual_num = float(actual)
+            return actual_num > expected
+        except (ValueError, TypeError):
+            return False
+
+    def _check_greater_than_or_equal(self, actual: Any, expected: int | float) -> bool:
+        """Check if actual value is greater than or equal to expected.
+
+        Args:
+            actual: The actual value from the resource
+            expected: The expected threshold value
+
+        Returns:
+            True if actual >= expected, False otherwise
+        """
+        try:
+            actual_num = float(actual)
+            return actual_num >= expected
+        except (ValueError, TypeError):
+            return False
+
+    def _check_less_than(self, actual: Any, expected: int | float) -> bool:
+        """Check if actual value is less than expected.
+
+        Args:
+            actual: The actual value from the resource
+            expected: The expected threshold value
+
+        Returns:
+            True if actual < expected, False otherwise
+        """
+        try:
+            actual_num = float(actual)
+            return actual_num < expected
+        except (ValueError, TypeError):
+            return False
+
+    def _check_less_than_or_equal(self, actual: Any, expected: int | float) -> bool:
+        """Check if actual value is less than or equal to expected.
+
+        Args:
+            actual: The actual value from the resource
+            expected: The expected threshold value
+
+        Returns:
+            True if actual <= expected, False otherwise
+        """
+        try:
+            actual_num = float(actual)
+            return actual_num <= expected
+        except (ValueError, TypeError):
+            return False
+
+    def _check_contains(self, actual: Any, expected: str) -> bool:
+        """Check if actual value contains the expected substring/element.
+
+        Works with strings (substring match) and lists (element match).
+
+        Args:
+            actual: The actual value from the resource (string or list)
+            expected: The substring/element to search for
+
+        Returns:
+            True if actual contains expected, False otherwise
+        """
+        try:
+            if isinstance(actual, str):
+                # String substring match
+                return expected in actual
+            elif isinstance(actual, list):
+                # List element match
+                return expected in actual
+            else:
+                # Try converting to string for other types
+                return expected in str(actual)
+        except (ValueError, TypeError):
+            return False
+
+    def _check_in_list(self, actual: Any, expected_list: List[Any]) -> bool:
+        """Check if actual value is in the expected list.
+
+        Args:
+            actual: The actual value from the resource
+            expected_list: The list of allowed values
+
+        Returns:
+            True if actual is in expected_list, False otherwise
+        """
+        try:
+            # Direct membership check
+            if actual in expected_list:
+                return True
+
+            # Try type coercion for common cases
+            for expected in expected_list:
+                if self._check_equals(actual, expected):
+                    return True
+
+            return False
+        except (ValueError, TypeError):
+            return False
+
+    def _check_regex_match(self, actual: Any, pattern: str) -> bool:
+        """Check if actual value matches the regex pattern.
+
+        Args:
+            actual: The actual value from the resource
+            pattern: The regular expression pattern to match
+
+        Returns:
+            True if actual matches pattern, False otherwise
+        """
+        try:
+            # Convert actual to string if needed
+            actual_str = str(actual) if not isinstance(actual, str) else actual
+
+            # Compile and match pattern
+            regex = re.compile(pattern)
+            return regex.search(actual_str) is not None
+        except (re.error, ValueError, TypeError):
+            return False
 
     def evaluate_all(
         self, rules: List[Rule], resources: List[Dict[str, Any]]

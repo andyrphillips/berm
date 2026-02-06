@@ -3,6 +3,7 @@
 from typing import List
 
 from berm.models.violation import Violation
+from berm.security import sanitize_for_output
 
 
 class GitHubReporter:
@@ -53,8 +54,11 @@ class GitHubReporter:
         # (that would come from HCL parsing in future versions)
         # So we just use the resource name as the title
 
-        title = f"{violation.rule_name}"
-        message = f"{violation.resource_name}: {violation.message}"
+        # Sanitize for GitHub context to prevent workflow command injection
+        title = sanitize_for_output(violation.rule_name, context="github")
+        resource_name = sanitize_for_output(violation.resource_name, context="github")
+        message_text = sanitize_for_output(violation.message, context="github")
+        message = f"{resource_name}: {message_text}"
 
         print(f"::{level} title={title}::{message}")
 
