@@ -208,3 +208,9 @@ __marimo__/
 
 # Claude 
 .claude/
+
+*.tf
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfvars.json
