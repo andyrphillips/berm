@@ -1,7 +1,8 @@
 """Simple property-based rule evaluator."""
 
+import operator
 import re
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from berm.models.rule import Rule
 from berm.models.violation import Violation
@@ -190,69 +191,40 @@ class SimpleEvaluator:
         # Values don't match
         return False
 
-    def _check_greater_than(self, actual: Any, expected: int | float) -> bool:
-        """Check if actual value is greater than expected.
+    def _check_numeric_comparison(
+        self, actual: Any, expected: int | float, op: Callable[[float, float], bool]
+    ) -> bool:
+        """Check numeric comparison using the provided operator.
 
         Args:
             actual: The actual value from the resource
             expected: The expected threshold value
+            op: Comparison operator function (e.g., operator.gt, operator.ge)
 
         Returns:
-            True if actual > expected, False otherwise
+            True if comparison passes, False otherwise
         """
         try:
             actual_num = float(actual)
-            return actual_num > expected
+            return op(actual_num, expected)
         except (ValueError, TypeError):
             return False
+
+    def _check_greater_than(self, actual: Any, expected: int | float) -> bool:
+        """Check if actual value is greater than expected."""
+        return self._check_numeric_comparison(actual, expected, operator.gt)
 
     def _check_greater_than_or_equal(self, actual: Any, expected: int | float) -> bool:
-        """Check if actual value is greater than or equal to expected.
-
-        Args:
-            actual: The actual value from the resource
-            expected: The expected threshold value
-
-        Returns:
-            True if actual >= expected, False otherwise
-        """
-        try:
-            actual_num = float(actual)
-            return actual_num >= expected
-        except (ValueError, TypeError):
-            return False
+        """Check if actual value is greater than or equal to expected."""
+        return self._check_numeric_comparison(actual, expected, operator.ge)
 
     def _check_less_than(self, actual: Any, expected: int | float) -> bool:
-        """Check if actual value is less than expected.
-
-        Args:
-            actual: The actual value from the resource
-            expected: The expected threshold value
-
-        Returns:
-            True if actual < expected, False otherwise
-        """
-        try:
-            actual_num = float(actual)
-            return actual_num < expected
-        except (ValueError, TypeError):
-            return False
+        """Check if actual value is less than expected."""
+        return self._check_numeric_comparison(actual, expected, operator.lt)
 
     def _check_less_than_or_equal(self, actual: Any, expected: int | float) -> bool:
-        """Check if actual value is less than or equal to expected.
-
-        Args:
-            actual: The actual value from the resource
-            expected: The expected threshold value
-
-        Returns:
-            True if actual <= expected, False otherwise
-        """
-        try:
-            actual_num = float(actual)
-            return actual_num <= expected
-        except (ValueError, TypeError):
-            return False
+        """Check if actual value is less than or equal to expected."""
+        return self._check_numeric_comparison(actual, expected, operator.le)
 
     def _check_contains(self, actual: Any, expected: str) -> bool:
         """Check if actual value contains the expected substring/element.

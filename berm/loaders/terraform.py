@@ -3,7 +3,14 @@
 import json
 from typing import Any, Dict, List
 
-from berm.security import SecurityError, MAX_ARRAY_INDEX
+from berm.security import (
+    ALLOWED_PLAN_EXTENSIONS,
+    MAX_ARRAY_INDEX,
+    SecurityError,
+    validate_file_size,
+    validate_json_depth,
+    validate_safe_path,
+)
 
 
 class TerraformPlanLoadError(Exception):
@@ -40,8 +47,6 @@ def load_terraform_plan(plan_path: str, _allow_absolute: bool = False) -> List[D
     """
     # Validate and sanitize the path (prevents path traversal, checks file size)
     try:
-        from berm.security import validate_safe_path, validate_file_size, validate_json_depth, ALLOWED_PLAN_EXTENSIONS
-
         path = validate_safe_path(
             plan_path,
             must_exist=True,

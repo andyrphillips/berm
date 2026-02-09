@@ -12,7 +12,6 @@ from typing import List, Optional
 import click
 from rich.console import Console
 from rich.panel import Panel
-from rich.syntax import Syntax
 
 from berm import __version__
 from berm.evaluators.simple import SimpleEvaluator
@@ -167,7 +166,7 @@ def convert(tfplan_file: str, output: str) -> None:
 
         berm convert plan.tfplan
 
-        berm convert plan.tfplan --output my-plan.json
+        berm convert plan.tfplan --output plan.json
 
     After conversion, you can run:
 

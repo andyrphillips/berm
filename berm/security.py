@@ -24,6 +24,74 @@ ALLOWED_RULE_EXTENSIONS = {".json"}
 DANGEROUS_FILENAME_CHARS = set(';|&$`<>(){}[]"\'\\\n\r\t\x00')
 
 
+def _validate_path_common(
+    path_str: str,
+    path_type: str,
+    base_dir: Optional[str],
+    allow_absolute: bool,
+) -> tuple[Path, Path]:
+    """Common path validation logic for files and directories.
+
+    Args:
+        path_str: The path string to validate
+        path_type: Type of path for error messages ("File" or "Directory")
+        base_dir: Base directory to restrict paths to
+        allow_absolute: Allow absolute paths outside base_dir
+
+    Returns:
+        Tuple of (base_path, resolved_path)
+
+    Raises:
+        SecurityError: If path validation fails
+        ValueError: If path is invalid
+    """
+    # Check path length
+    if len(path_str) > MAX_PATH_LENGTH:
+        raise SecurityError(f"{path_type} path exceeds maximum length of {MAX_PATH_LENGTH}")
+
+    # Check for null bytes
+    if "\x00" in path_str:
+        raise SecurityError(f"Null bytes not allowed in {path_type.lower()} paths")
+
+    # Convert to Path object
+    try:
+        path = Path(path_str)
+    except Exception as e:
+        raise ValueError(f"Invalid {path_type.lower()} path: {e}")
+
+    # Determine base directory
+    if base_dir is None:
+        base_dir = os.getcwd()
+
+    # Resolve paths
+    try:
+        base = Path(base_dir).resolve()
+        resolved = path.resolve()
+    except Exception as e:
+        raise ValueError(f"Failed to resolve path: {e}")
+
+    # Check for path traversal
+    if not allow_absolute:
+        is_explicit_base = base_dir != os.getcwd()
+        is_relative_input = not Path(path_str).is_absolute()
+
+        if is_explicit_base or is_relative_input:
+            try:
+                resolved.relative_to(base)
+            except ValueError:
+                if is_relative_input:
+                    raise SecurityError(
+                        f"Path traversal detected: relative path '{path_str}' resolves to '{resolved}' "
+                        f"which is outside base directory '{base}'"
+                    )
+                else:
+                    raise SecurityError(
+                        f"Path '{path_str}' is outside explicitly specified base directory '{base}'"
+                    )
+
+    return base, resolved
+
+
 def validate_safe_path(
     file_path: str,
     base_dir: Optional[str] = None,
@@ -53,65 +121,21 @@ def validate_safe_path(
     if not file_path:
         raise ValueError("File path cannot be empty")
 
-    # Check path length to prevent buffer overflow attacks
-    if len(file_path) > MAX_PATH_LENGTH:
-        raise SecurityError(f"File path exceeds maximum length of {MAX_PATH_LENGTH}")
-
-    # Check for null bytes (path injection)
-    if "\x00" in file_path:
-        raise SecurityError("Null bytes not allowed in file paths")
+    # Perform common path validation (includes null byte check)
+    base, resolved = _validate_path_common(file_path, "File", base_dir, allow_absolute)
 
     # Check for dangerous characters that could be used for command injection
     # We validate the basename (filename) only, not the full path, to allow
     # legitimate path separators while blocking shell metacharacters
+    # Note: DANGEROUS_FILENAME_CHARS includes \x00, so this check is redundant for null bytes
+    # but kept for additional shell metacharacter validation
     filename = Path(file_path).name
-    dangerous_chars_found = [c for c in filename if c in DANGEROUS_FILENAME_CHARS]
+    dangerous_chars_found = [c for c in filename if c in DANGEROUS_FILENAME_CHARS and c != '\x00']
     if dangerous_chars_found:
         raise SecurityError(
             f"Filename contains dangerous characters: {dangerous_chars_found}. "
             f"Only alphanumeric, dash, underscore, and dot are allowed in filenames."
         )
-
-    # Convert to Path object
-    try:
-        path = Path(file_path)
-    except Exception as e:
-        raise ValueError(f"Invalid file path: {e}")
-
-    # Determine base directory
-    if base_dir is None:
-        base_dir = os.getcwd()
-
-    try:
-        base = Path(base_dir).resolve()
-        resolved = path.resolve()
-    except Exception as e:
-        raise ValueError(f"Failed to resolve path: {e}")
-
-    # Check for path traversal
-    # For relative paths: ensure they don't escape the base directory
-    # For absolute paths: allow them unless explicitly restricted by base_dir parameter
-    # The allow_absolute flag is only for testing with temp directories
-    if not allow_absolute:
-        # If base_dir was explicitly provided (not CWD), validate all paths are within it
-        # If base_dir is CWD (default), only validate relative paths don't traverse
-        is_explicit_base = base_dir != os.getcwd()
-        is_relative_input = not Path(file_path).is_absolute()
-
-        # Validate if: explicit base_dir provided OR input is relative path
-        if is_explicit_base or is_relative_input:
-            try:
-                resolved.relative_to(base)
-            except ValueError:
-                if is_relative_input:
-                    raise SecurityError(
-                        f"Path traversal detected: relative path '{file_path}' resolves to '{resolved}' "
-                        f"which is outside base directory '{base}'"
-                    )
-                else:
-                    raise SecurityError(
-                        f"Path '{file_path}' is outside explicitly specified base directory '{base}'"
-                    )
 
     # Validate file extension if specified
     if allowed_extensions is not None:
@@ -121,12 +145,12 @@ def validate_safe_path(
                 f"Allowed extensions: {', '.join(sorted(allowed_extensions))}"
             )
 
-    # Check existence if required
-    if must_exist and not resolved.exists():
-        raise ValueError(f"File does not exist: {file_path}")
-
-    if must_exist and not resolved.is_file():
-        raise ValueError(f"Path is not a file: {file_path}")
+    # Check existence and type
+    if must_exist:
+        if not resolved.exists():
+            raise ValueError(f"File does not exist: {file_path}")
+        if not resolved.is_file():
+            raise ValueError(f"Path is not a file: {file_path}")
 
     return resolved
 
@@ -155,63 +179,15 @@ def validate_safe_directory(
     if not dir_path:
         raise ValueError("Directory path cannot be empty")
 
-    # Check path length
-    if len(dir_path) > MAX_PATH_LENGTH:
-        raise SecurityError(
-            f"Directory path exceeds maximum length of {MAX_PATH_LENGTH}"
-        )
+    # Perform common path validation
+    base, resolved = _validate_path_common(dir_path, "Directory", base_dir, allow_absolute)
 
-    # Check for null bytes
-    if "\x00" in dir_path:
-        raise SecurityError("Null bytes not allowed in directory paths")
-
-    # Convert to Path object
-    try:
-        path = Path(dir_path)
-    except Exception as e:
-        raise ValueError(f"Invalid directory path: {e}")
-
-    # Determine base directory
-    if base_dir is None:
-        base_dir = os.getcwd()
-
-    try:
-        base = Path(base_dir).resolve()
-        resolved = path.resolve()
-    except Exception as e:
-        raise ValueError(f"Failed to resolve path: {e}")
-
-    # Check for path traversal
-    # For relative paths: ensure they don't escape the base directory
-    # For absolute paths: allow them unless explicitly restricted by base_dir parameter
-    # The allow_absolute flag is only for testing with temp directories
-    if not allow_absolute:
-        # If base_dir was explicitly provided (not CWD), validate all paths are within it
-        # If base_dir is CWD (default), only validate relative paths don't traverse
-        is_explicit_base = base_dir != os.getcwd()
-        is_relative_input = not Path(dir_path).is_absolute()
-
-        # Validate if: explicit base_dir provided OR input is relative path
-        if is_explicit_base or is_relative_input:
-            try:
-                resolved.relative_to(base)
-            except ValueError:
-                if is_relative_input:
-                    raise SecurityError(
-                        f"Path traversal detected: relative path '{dir_path}' resolves to '{resolved}' "
-                        f"which is outside base directory '{base}'"
-                    )
-                else:
-                    raise SecurityError(
-                        f"Path '{dir_path}' is outside explicitly specified base directory '{base}'"
-                    )
-
-    # Check existence if required
-    if must_exist and not resolved.exists():
-        raise ValueError(f"Directory does not exist: {dir_path}")
-
-    if must_exist and not resolved.is_dir():
-        raise ValueError(f"Path is not a directory: {dir_path}")
+    # Check existence and type
+    if must_exist:
+        if not resolved.exists():
+            raise ValueError(f"Directory does not exist: {dir_path}")
+        if not resolved.is_dir():
+            raise ValueError(f"Path is not a directory: {dir_path}")
 
     return resolved
 
