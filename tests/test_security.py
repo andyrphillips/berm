@@ -8,12 +8,15 @@ import pytest
 
 from berm.security import (
     MAX_FILE_SIZE,
+    MAX_JSON_DEPTH,
     MAX_PROPERTY_DEPTH,
     SecurityError,
+    sanitize_for_output,
     sanitize_output_path,
     sanitize_rules_directory,
     sanitize_terraform_plan_path,
     validate_file_size,
+    validate_json_depth,
     validate_property_path,
     validate_safe_directory,
     validate_safe_path,
@@ -345,3 +348,273 @@ class TestRealWorldAttacks:
             assert str(result.resolve()).startswith(str(tmp_path.resolve()))
         finally:
             os.chdir(original_cwd)
+
+
+class TestOutputSanitization:
+    """Test output sanitization for injection attack prevention."""
+
+    def test_ansi_escape_code_removal(self):
+        """Test that ANSI escape codes are removed."""
+        # Red color code
+        text_with_ansi = "\x1b[31mRed text\x1b[0m"
+        sanitized = sanitize_for_output(text_with_ansi, context="terminal")
+        assert sanitized == "Red text"
+        assert "\x1b" not in sanitized
+
+        # Multiple escape codes
+        text_with_multiple = "\x1b[1m\x1b[31mBold Red\x1b[0m\x1b[0m"
+        sanitized = sanitize_for_output(text_with_multiple, context="terminal")
+        assert sanitized == "Bold Red"
+
+    def test_control_character_removal(self):
+        """Test that control characters are removed."""
+        # Newline and carriage return
+        text_with_controls = "Line1\nLine2\rLine3"
+        sanitized = sanitize_for_output(text_with_controls, context="terminal")
+        assert "\n" not in sanitized
+        assert "\r" not in sanitized
+        assert sanitized == "Line1Line2Line3"
+
+        # Tab should be preserved
+        text_with_tab = "Column1\tColumn2"
+        sanitized = sanitize_for_output(text_with_tab, context="terminal")
+        assert "\t" in sanitized
+
+        # DEL character (0x7f)
+        text_with_del = "Text\x7fMore"
+        sanitized = sanitize_for_output(text_with_del, context="terminal")
+        assert "\x7f" not in sanitized
+
+    def test_github_actions_command_injection_prevention(self):
+        """Test GitHub Actions workflow command injection prevention."""
+        # Test :: command injection
+        malicious = "::error::Injected error message"
+        sanitized = sanitize_for_output(malicious, context="github")
+        assert "::" not in sanitized
+        assert ":\u200b:" in sanitized  # Zero-width space breaks command
+
+        # Test set-output command
+        malicious = "::set-output name=token::secret123"
+        sanitized = sanitize_for_output(malicious, context="github")
+        assert "::set-output" not in sanitized
+        assert ":\u200b:" in sanitized
+
+        # Terminal context should not add zero-width space
+        text = "::normal text::"
+        sanitized_terminal = sanitize_for_output(text, context="terminal")
+        assert "::" in sanitized_terminal
+        assert "\u200b" not in sanitized_terminal
+
+    def test_length_truncation(self):
+        """Test that excessively long strings are truncated."""
+        # Create a string longer than 10,000 characters
+        long_text = "A" * 15000
+        sanitized = sanitize_for_output(long_text, context="terminal")
+
+        # Should be truncated to 10,000 + "... (truncated)"
+        assert len(sanitized) < len(long_text)
+        assert sanitized.endswith("... (truncated)")
+        assert len(sanitized) <= 10000 + len("... (truncated)")
+
+    def test_empty_string_handling(self):
+        """Test that empty strings are handled correctly."""
+        assert sanitize_for_output("", context="terminal") == ""
+        assert sanitize_for_output("", context="github") == ""
+        assert sanitize_for_output("", context="json") == ""
+
+    def test_json_context_sanitization(self):
+        """Test JSON context-specific sanitization."""
+        # JSON context should still remove ANSI and control characters
+        text_with_ansi = "\x1b[31mRed\x1b[0m"
+        sanitized = sanitize_for_output(text_with_ansi, context="json")
+        assert "\x1b" not in sanitized
+        assert sanitized == "Red"
+
+        # Control characters removed
+        text_with_controls = "Line1\nLine2"
+        sanitized = sanitize_for_output(text_with_controls, context="json")
+        assert "\n" not in sanitized
+
+    def test_combined_attack_vectors(self):
+        """Test multiple attack vectors combined."""
+        # Combine ANSI codes, control characters, and GitHub commands
+        malicious = "\x1b[31m::error::\x1b[0m\nInjected\rCommand"
+
+        # Terminal context
+        sanitized_terminal = sanitize_for_output(malicious, context="terminal")
+        assert "\x1b" not in sanitized_terminal
+        assert "\n" not in sanitized_terminal
+        assert "\r" not in sanitized_terminal
+
+        # GitHub context
+        sanitized_github = sanitize_for_output(malicious, context="github")
+        assert "\x1b" not in sanitized_github
+        assert "::" not in sanitized_github
+        assert ":\u200b:" in sanitized_github
+
+    def test_preserves_normal_text(self):
+        """Test that normal text is preserved."""
+        normal_text = "This is normal text with punctuation! And numbers: 123."
+        sanitized = sanitize_for_output(normal_text, context="terminal")
+        assert sanitized == normal_text
+
+    def test_unicode_text_preservation(self):
+        """Test that legitimate Unicode characters are preserved."""
+        unicode_text = "Hello 世界 🌍 émojis"
+        sanitized = sanitize_for_output(unicode_text, context="terminal")
+        # Should preserve Unicode characters (only control chars removed)
+        assert "世界" in sanitized
+        assert "🌍" in sanitized
+        assert "é" in sanitized
+
+
+class TestJsonDepthValidation:
+    """Test JSON depth validation for DoS prevention."""
+
+    def test_valid_shallow_json(self):
+        """Test that shallow JSON structures are accepted."""
+        shallow_obj = {"a": 1, "b": 2, "c": {"d": 3}}
+        validate_json_depth(shallow_obj)  # Should not raise
+
+        shallow_list = [1, 2, [3, 4, [5, 6]]]
+        validate_json_depth(shallow_list)  # Should not raise
+
+    def test_valid_moderate_depth_json(self):
+        """Test that moderate depth JSON is accepted."""
+        # Create nested dict at depth 25 (within limit of 50)
+        obj = {"level": 0}
+        current = obj
+        for i in range(1, 25):
+            current["nested"] = {"level": i}
+            current = current["nested"]
+
+        validate_json_depth(obj)  # Should not raise
+
+    def test_maximum_allowed_depth(self):
+        """Test JSON at exactly the maximum depth."""
+        # Create nested structure at depth MAX_JSON_DEPTH (50)
+        obj = {"level": 0}
+        current = obj
+        for i in range(1, MAX_JSON_DEPTH):
+            current["nested"] = {"level": i}
+            current = current["nested"]
+
+        validate_json_depth(obj)  # Should not raise
+
+    def test_excessive_depth_rejected(self):
+        """Test that excessively deep JSON is rejected."""
+        # Create nested structure deeper than MAX_JSON_DEPTH
+        obj = {"level": 0}
+        current = obj
+        for i in range(1, MAX_JSON_DEPTH + 5):
+            current["nested"] = {"level": i}
+            current = current["nested"]
+
+        with pytest.raises(SecurityError, match="exceeds maximum allowed depth"):
+            validate_json_depth(obj)
+
+    def test_deeply_nested_arrays(self):
+        """Test deeply nested array structures."""
+        # Create deeply nested array
+        arr = []
+        current = arr
+        for i in range(MAX_JSON_DEPTH + 2):
+            nested = []
+            current.append(nested)
+            current = nested
+
+        with pytest.raises(SecurityError, match="exceeds maximum allowed depth"):
+            validate_json_depth(arr)
+
+    def test_mixed_nesting(self):
+        """Test mixed dict and array nesting."""
+        # Create mixed structure at the limit
+        obj = {"data": []}
+        current_dict = obj
+        current_list = obj["data"]
+
+        for i in range(MAX_JSON_DEPTH + 2):
+            if i % 2 == 0:
+                new_dict = {"level": i}
+                current_list.append(new_dict)
+                current_dict = new_dict
+                current_dict["nested"] = []
+                current_list = current_dict["nested"]
+            else:
+                new_list = []
+                current_dict["nested"] = new_list
+                current_list = new_list
+
+        with pytest.raises(SecurityError, match="exceeds maximum allowed depth"):
+            validate_json_depth(obj)
+
+    def test_primitive_values(self):
+        """Test that primitive values are accepted."""
+        validate_json_depth(None)  # Should not raise
+        validate_json_depth(123)  # Should not raise
+        validate_json_depth("string")  # Should not raise
+        validate_json_depth(True)  # Should not raise
+        validate_json_depth(3.14)  # Should not raise
+
+    def test_custom_depth_limit(self):
+        """Test custom depth limits."""
+        # Create structure with depth 10
+        obj = {"level": 0}
+        current = obj
+        for i in range(1, 10):
+            current["nested"] = {"level": i}
+            current = current["nested"]
+
+        # Should pass with limit of 15
+        validate_json_depth(obj, max_depth=15)
+
+        # Should fail with limit of 5
+        with pytest.raises(SecurityError, match="exceeds maximum allowed depth"):
+            validate_json_depth(obj, max_depth=5)
+
+    def test_wide_but_shallow_structures(self):
+        """Test wide structures that are not deep."""
+        # Create a wide dict (many keys, but shallow)
+        wide_obj = {f"key{i}": i for i in range(1000)}
+        validate_json_depth(wide_obj)  # Should not raise
+
+        # Wide array
+        wide_array = list(range(1000))
+        validate_json_depth(wide_array)  # Should not raise
+
+    def test_empty_structures(self):
+        """Test empty dicts and arrays."""
+        validate_json_depth({})  # Should not raise
+        validate_json_depth([])  # Should not raise
+        validate_json_depth({"empty_dict": {}, "empty_list": []})  # Should not raise
+
+    def test_realistic_terraform_plan_structure(self):
+        """Test a realistic Terraform plan JSON structure."""
+        terraform_plan = {
+            "format_version": "1.0",
+            "terraform_version": "1.5.0",
+            "resource_changes": [
+                {
+                    "address": "aws_s3_bucket.example",
+                    "mode": "managed",
+                    "type": "aws_s3_bucket",
+                    "change": {
+                        "actions": ["create"],
+                        "before": None,
+                        "after": {
+                            "bucket": "my-bucket",
+                            "versioning": {
+                                "enabled": True,
+                                "mfa_delete": False
+                            },
+                            "tags": {
+                                "Environment": "production",
+                                "Team": "platform"
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+
+        validate_json_depth(terraform_plan)  # Should not raise
