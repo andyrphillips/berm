@@ -39,10 +39,20 @@ class SimpleEvaluator:
         """
         violations = []
 
-        # Filter resources by type
-        matching_resources = [
-            r for r in resources if r["type"] == rule.resource_type
-        ]
+        # Filter resources by type(s)
+        if rule.resource_type is not None:
+            # Single resource type (backwards compatible)
+            matching_resources = [
+                r for r in resources if r["type"] == rule.resource_type
+            ]
+        elif rule.resource_types is not None:
+            # Multiple resource types (new feature)
+            matching_resources = [
+                r for r in resources if r["type"] in rule.resource_types
+            ]
+        else:
+            # Should never happen due to model validation
+            matching_resources = []
 
         # Evaluate each matching resource
         for resource in matching_resources:
@@ -126,6 +136,12 @@ class SimpleEvaluator:
         elif rule.regex_match is not None:
             passes = self._check_regex_match(actual_value, rule.regex_match)
             operator_desc = f"matches pattern '{rule.regex_match}'"
+        elif rule.has_keys is not None:
+            passes = self._check_has_keys(actual_value, rule.has_keys)
+            operator_desc = f"has keys {rule.has_keys}"
+        elif rule.is_not_empty is not None:
+            passes = self._check_is_not_empty(actual_value)
+            operator_desc = "is not empty"
         else:
             # Should never happen due to model validation
             passes = False
@@ -294,6 +310,49 @@ class SimpleEvaluator:
             return regex.search(actual_str) is not None
         except (re.error, ValueError, TypeError):
             return False
+
+    def _check_has_keys(self, actual: Any, required_keys: List[str]) -> bool:
+        """Check if actual value (dict) contains all required keys.
+
+        Args:
+            actual: The actual value from the resource (should be dict)
+            required_keys: List of keys that must be present
+
+        Returns:
+            True if all required keys are present, False otherwise
+        """
+        try:
+            if not isinstance(actual, dict):
+                return False
+
+            # Check if all required keys exist in the dictionary
+            actual_keys = set(actual.keys())
+            required_set = set(required_keys)
+
+            return required_set.issubset(actual_keys)
+        except (ValueError, TypeError, AttributeError):
+            return False
+
+    def _check_is_not_empty(self, actual: Any) -> bool:
+        """Check if actual value exists and is not empty.
+
+        Works with dicts, lists, strings, and other types.
+
+        Args:
+            actual: The actual value from the resource
+
+        Returns:
+            True if value is not None and not empty, False otherwise
+        """
+        if actual is None:
+            return False
+
+        # For collections (dict, list, str, set, etc.), check length
+        if hasattr(actual, '__len__'):
+            return len(actual) > 0
+
+        # For other types, consider non-None as not empty
+        return True
 
     def evaluate_all(
         self, rules: List[Rule], resources: List[Dict[str, Any]]

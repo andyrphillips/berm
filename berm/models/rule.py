@@ -58,9 +58,15 @@ class Rule(BaseModel):
         min_length=1,
     )
 
-    resource_type: str = Field(
-        ...,
-        description="Terraform resource type to check (e.g., 'aws_s3_bucket')",
+    resource_type: Optional[str] = Field(
+        None,
+        description="Terraform resource type to check (e.g., 'aws_s3_bucket'). Use resource_types for multiple types.",
+        min_length=1,
+    )
+
+    resource_types: Optional[List[str]] = Field(
+        None,
+        description="List of Terraform resource types to check (alternative to resource_type)",
         min_length=1,
     )
 
@@ -123,6 +129,17 @@ class Rule(BaseModel):
         description="Property value must match this regular expression pattern",
     )
 
+    has_keys: Optional[List[str]] = Field(
+        None,
+        description="Property value (dict) must contain all of these keys",
+        min_length=1,
+    )
+
+    is_not_empty: Optional[bool] = Field(
+        None,
+        description="Property value must exist and not be empty (for dicts, lists, or strings)",
+    )
+
     message: str = Field(
         ...,
         description="Error message to display when rule fails. Supports {{resource_name}} template.",
@@ -147,6 +164,33 @@ class Rule(BaseModel):
             except Exception as e:
                 raise ValueError(f"Invalid property path: {e}")
         return v
+
+    @model_validator(mode="after")
+    def validate_resource_type_exclusivity(self) -> "Rule":
+        """Ensure either resource_type OR resource_types is specified, not both."""
+        has_single = self.resource_type is not None
+        has_multiple = self.resource_types is not None
+
+        if not has_single and not has_multiple:
+            raise ValueError(
+                "Rule must specify either 'resource_type' (single) or 'resource_types' (multiple)"
+            )
+
+        if has_single and has_multiple:
+            raise ValueError(
+                "Rule cannot specify both 'resource_type' and 'resource_types'. Use one or the other."
+            )
+
+        # Validate resource_types list if provided
+        if has_multiple:
+            if len(self.resource_types) == 0:
+                raise ValueError("resource_types must contain at least one resource type")
+
+            # Check for duplicates
+            if len(self.resource_types) != len(set(self.resource_types)):
+                raise ValueError("resource_types contains duplicate entries")
+
+        return self
 
     @model_validator(mode="after")
     def validate_comparison_operator(self) -> "Rule":
@@ -191,6 +235,8 @@ class Rule(BaseModel):
                 self.contains is not None,
                 self.in_list is not None,
                 self.regex_match is not None,
+                self.has_keys is not None,
+                self.is_not_empty is not None,
             ] if op
         ]
 
@@ -198,7 +244,7 @@ class Rule(BaseModel):
             raise ValueError(
                 "Rule must specify exactly one comparison operator: "
                 "equals, greater_than, greater_than_or_equal, less_than, less_than_or_equal, "
-                "contains, in, or regex_match"
+                "contains, in, regex_match, has_keys, or is_not_empty"
             )
 
         if len(specified) > 1:
@@ -235,3 +281,18 @@ class Rule(BaseModel):
             f"Rule(id='{self.id}', name='{self.name}', "
             f"resource_type='{self.resource_type}', severity='{self.severity}')"
         )
+
+    def matches_resource_type(self, resource_type: str) -> bool:
+        """Check if this rule applies to the given resource type.
+
+        Args:
+            resource_type: Resource type to check (e.g., 'aws_s3_bucket')
+
+        Returns:
+            True if rule applies to this resource type
+        """
+        if self.resource_type is not None:
+            return resource_type == self.resource_type
+        elif self.resource_types is not None:
+            return resource_type in self.resource_types
+        return False
