@@ -37,6 +37,10 @@ class SimpleEvaluator:
         Returns:
             List of violations found (empty if all resources comply)
         """
+        # Skip rules without property (pure cross-resource or forbidden resource rules)
+        if rule.property is None and not rule.resource_forbidden:
+            return []
+
         violations = []
 
         # Filter resources by type(s)

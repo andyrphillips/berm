@@ -3,7 +3,7 @@
 import pytest
 
 from berm.evaluators.simple import SimpleEvaluator
-from berm.models.rule import Rule
+from berm.models.rule import RequiredResource, Rule
 from berm.models.violation import Violation
 
 
@@ -468,3 +468,37 @@ def test_evaluator_regex_match_complex():
 
     violations = evaluator.evaluate(rule, resources_bad)
     assert len(violations) == 1
+
+def test_evaluator_skips_cross_resource_rules():
+    """Test that SimpleEvaluator skips pure cross-resource rules (no property)."""
+    evaluator = SimpleEvaluator()
+
+    # Pure cross-resource rule (no property field)
+    rule = Rule(
+        id="s3-requires-versioning",
+        name="S3 buckets must have versioning",
+        resource_type="aws_s3_bucket",
+        severity="error",
+        requires_resources=[
+            RequiredResource(
+                resource_type="aws_s3_bucket_versioning",
+                relationship="referenced_by_primary",
+                reference_property="bucket",
+                min_count=1,
+            )
+        ],
+        message="S3 bucket must have versioning",
+    )
+
+    resources = [
+        {
+            "address": "aws_s3_bucket.test",
+            "type": "aws_s3_bucket",
+            "name": "test",
+            "values": {"bucket": "test"},
+        }
+    ]
+
+    # Should return empty list (SimpleEvaluator skips cross-resource rules)
+    violations = evaluator.evaluate(rule, resources)
+    assert violations == []
