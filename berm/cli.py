@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from berm import __version__
+from berm.evaluators.cross_resource import CrossResourceEvaluator
 from berm.evaluators.simple import SimpleEvaluator
 from berm.loaders.rules import RuleLoadError, load_rules
 from berm.loaders.terraform import TerraformPlanLoadError, load_terraform_plan
@@ -546,12 +547,31 @@ def run_check(
         if verbose:
             click.echo(f"Loaded {len(resources)} resource(s)")
 
+        # Load full plan data for cross-resource validation
+        # We need the configuration section for reference tracking
+        plan_data = None
+        try:
+            with open(plan_file, "r", encoding="utf-8-sig") as f:
+                plan_data = json.load(f)
+        except Exception:
+            # If we can't load plan data, cross-resource validation will degrade gracefully
+            pass
+
         # Evaluate rules
         if verbose:
             click.echo("Evaluating policy rules...")
 
-        evaluator = SimpleEvaluator()
-        violations = evaluator.evaluate_all(rules, resources)
+        # Use both evaluators
+        simple_evaluator = SimpleEvaluator()
+        cross_evaluator = CrossResourceEvaluator()
+
+        violations = []
+        for rule in rules:
+            # Simple property-based evaluation
+            violations.extend(simple_evaluator.evaluate(rule, resources))
+
+            # Cross-resource relationship evaluation
+            violations.extend(cross_evaluator.evaluate(rule, resources, plan_data))
 
         # Report violations
         reporter = get_reporter(format)

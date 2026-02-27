@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from berm.models.rule import Rule
+from berm.models.rule import RequiredResource, Rule
 
 
 def test_rule_creation_valid():
@@ -307,3 +307,227 @@ def test_rule_matches_resource_type_multiple():
     assert rule.matches_resource_type("aws_db_instance") is True
     assert rule.matches_resource_type("aws_lambda_function") is True
     assert rule.matches_resource_type("aws_instance") is False
+
+
+# Tests for RequiredResource model
+
+
+def test_required_resource_creation_valid():
+    """Test creating a valid RequiredResource."""
+    req = RequiredResource(
+        resource_type="aws_s3_bucket_versioning",
+        relationship="referenced_by_primary",
+        reference_property="bucket",
+        min_count=1,
+    )
+
+    assert req.resource_type == "aws_s3_bucket_versioning"
+    assert req.relationship == "referenced_by_primary"
+    assert req.reference_property == "bucket"
+    assert req.min_count == 1
+    assert req.max_count is None
+    assert req.conditions is None
+    assert req.message_suffix is None
+
+
+def test_required_resource_with_conditions():
+    """Test RequiredResource with conditions."""
+    req = RequiredResource(
+        resource_type="aws_s3_bucket_versioning",
+        relationship="referenced_by_primary",
+        reference_property="bucket",
+        min_count=1,
+        conditions={"versioning_configuration.0.status": "Enabled"},
+        message_suffix="with versioning enabled",
+    )
+
+    assert req.conditions == {"versioning_configuration.0.status": "Enabled"}
+    assert req.message_suffix == "with versioning enabled"
+
+
+def test_required_resource_requires_reference_property():
+    """Test that reference_property is required for reference-based relationships."""
+    # Should fail for referenced_by_primary without reference_property
+    with pytest.raises(ValidationError, match="reference_property is required"):
+        RequiredResource(
+            resource_type="aws_s3_bucket_versioning",
+            relationship="referenced_by_primary",
+        )
+
+    # Should fail for references_primary without reference_property
+    with pytest.raises(ValidationError, match="reference_property is required"):
+        RequiredResource(
+            resource_type="aws_lb",
+            relationship="references_primary",
+        )
+
+    # Should succeed for same_name_suffix without reference_property
+    req = RequiredResource(
+        resource_type="aws_s3_bucket_versioning",
+        relationship="same_name_suffix",
+    )
+    assert req.reference_property is None
+
+
+def test_required_resource_count_validation():
+    """Test that max_count must be >= min_count."""
+    # Valid: max > min
+    req1 = RequiredResource(
+        resource_type="aws_lb_listener",
+        relationship="references_primary",
+        reference_property="load_balancer_arn",
+        min_count=1,
+        max_count=5,
+    )
+    assert req1.max_count == 5
+
+    # Valid: max == min
+    req2 = RequiredResource(
+        resource_type="aws_lb_listener",
+        relationship="references_primary",
+        reference_property="load_balancer_arn",
+        min_count=1,
+        max_count=1,
+    )
+    assert req2.max_count == 1
+
+    # Invalid: max < min
+    with pytest.raises(ValidationError, match="max_count.*must be >= min_count"):
+        RequiredResource(
+            resource_type="aws_lb_listener",
+            relationship="references_primary",
+            reference_property="load_balancer_arn",
+            min_count=5,
+            max_count=2,
+        )
+
+
+# Tests for cross-resource rules
+
+
+def test_rule_with_requires_resources():
+    """Test creating a rule with requires_resources (pure cross-resource validation)."""
+    rule = Rule(
+        id="s3-bucket-requires-versioning",
+        name="S3 buckets must have versioning configured",
+        resource_type="aws_s3_bucket",
+        severity="error",
+        requires_resources=[
+            RequiredResource(
+                resource_type="aws_s3_bucket_versioning",
+                relationship="referenced_by_primary",
+                reference_property="bucket",
+                min_count=1,
+                conditions={"versioning_configuration.0.status": "Enabled"},
+            )
+        ],
+        message="S3 bucket {{resource_name}} must have versioning configured",
+    )
+
+    assert rule.requires_resources is not None
+    assert len(rule.requires_resources) == 1
+    assert rule.requires_resources[0].resource_type == "aws_s3_bucket_versioning"
+    assert rule.property is None  # Pure cross-resource rule, no property check
+
+
+def test_rule_with_both_property_and_requires_resources():
+    """Test rule that combines property check with cross-resource validation."""
+    rule = Rule(
+        id="s3-secure-bucket",
+        name="S3 buckets must be encrypted and have versioning",
+        resource_type="aws_s3_bucket",
+        severity="error",
+        property="server_side_encryption_configuration.0.rule.0.apply_server_side_encryption_by_default.0.sse_algorithm",
+        equals="AES256",
+        requires_resources=[
+            RequiredResource(
+                resource_type="aws_s3_bucket_versioning",
+                relationship="referenced_by_primary",
+                reference_property="bucket",
+                min_count=1,
+            )
+        ],
+        message="S3 bucket {{resource_name}} must be encrypted and have versioning",
+    )
+
+    assert rule.property is not None
+    assert rule.equals == "AES256"
+    assert rule.requires_resources is not None
+    assert len(rule.requires_resources) == 1
+
+
+def test_rule_cross_resource_without_operators():
+    """Test that pure cross-resource rules cannot have comparison operators."""
+    # Should fail if we specify requires_resources but also a comparison operator without property
+    with pytest.raises(ValidationError, match="should not specify comparison operators"):
+        Rule(
+            id="test",
+            name="Test",
+            resource_type="aws_s3_bucket",
+            severity="error",
+            requires_resources=[
+                RequiredResource(
+                    resource_type="aws_s3_bucket_versioning",
+                    relationship="referenced_by_primary",
+                    reference_property="bucket",
+                )
+            ],
+            equals=True,  # Invalid: no property but has operator
+            message="msg",
+        )
+
+
+def test_rule_forbidden_resource_cannot_have_requires_resources():
+    """Test that resource_forbidden rules cannot have requires_resources."""
+    with pytest.raises(ValidationError, match="resource_forbidden rules cannot specify requires_resources"):
+        Rule(
+            id="test",
+            name="Test",
+            resource_type="aws_s3_bucket",
+            severity="error",
+            resource_forbidden=True,
+            requires_resources=[
+                RequiredResource(
+                    resource_type="aws_s3_bucket_versioning",
+                    relationship="referenced_by_primary",
+                    reference_property="bucket",
+                )
+            ],
+            message="msg",
+        )
+
+
+def test_rule_multiple_required_resources():
+    """Test rule with multiple required resources."""
+    rule = Rule(
+        id="s3-bucket-security",
+        name="S3 buckets must have full security configuration",
+        resource_type="aws_s3_bucket",
+        severity="error",
+        requires_resources=[
+            RequiredResource(
+                resource_type="aws_s3_bucket_versioning",
+                relationship="referenced_by_primary",
+                reference_property="bucket",
+                min_count=1,
+            ),
+            RequiredResource(
+                resource_type="aws_s3_bucket_public_access_block",
+                relationship="referenced_by_primary",
+                reference_property="bucket",
+                min_count=1,
+            ),
+            RequiredResource(
+                resource_type="aws_s3_bucket_server_side_encryption_configuration",
+                relationship="referenced_by_primary",
+                reference_property="bucket",
+                min_count=1,
+            ),
+        ],
+        message="S3 bucket {{resource_name}} must have complete security configuration",
+    )
+
+    assert len(rule.requires_resources) == 3
+    assert rule.requires_resources[0].resource_type == "aws_s3_bucket_versioning"
+    assert rule.requires_resources[1].resource_type == "aws_s3_bucket_public_access_block"
+    assert rule.requires_resources[2].resource_type == "aws_s3_bucket_server_side_encryption_configuration"

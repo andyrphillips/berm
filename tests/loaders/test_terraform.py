@@ -7,6 +7,9 @@ import pytest
 
 from berm.loaders.terraform import (
     TerraformPlanLoadError,
+    _extract_address_from_reference,
+    extract_constant_values,
+    extract_resource_references,
     get_nested_property,
     get_resource_by_type,
     load_terraform_plan,
@@ -135,6 +138,60 @@ def test_load_terraform_plan_excludes_noop(tmp_path):
     assert resources[0]["address"] == "aws_s3_bucket.changed"
 
 
+def test_load_terraform_plan_includes_replaced(tmp_path):
+    """Test that replaced resources are INCLUDED for validation."""
+    plan_data = {
+        "resource_changes": [
+            {
+                "address": "aws_s3_bucket.kept",
+                "type": "aws_s3_bucket",
+                "name": "kept",
+                "change": {
+                    "actions": ["create"],
+                    "after": {"bucket": "new-bucket"},
+                },
+            },
+            {
+                "address": "aws_s3_bucket.replaced_standard",
+                "type": "aws_s3_bucket",
+                "name": "replaced_standard",
+                "change": {
+                    "actions": ["delete", "create"],  # Standard replace
+                    "before": {"bucket": "old-bucket"},
+                    "after": {"bucket": "replacement-bucket"},
+                },
+            },
+            {
+                "address": "aws_s3_bucket.replaced_create_before_destroy",
+                "type": "aws_s3_bucket",
+                "name": "replaced_create_before_destroy",
+                "change": {
+                    "actions": ["create", "delete"],  # create_before_destroy
+                    "before": {"bucket": "old-bucket-2"},
+                    "after": {"bucket": "replacement-bucket-2"},
+                },
+            },
+        ]
+    }
+
+    plan_file = tmp_path / "plan.json"
+    with open(plan_file, "w") as f:
+        json.dump(plan_data, f)
+
+    resources = load_terraform_plan(str(plan_file), _allow_absolute=True)
+
+    # Should include ALL THREE: the created resource AND both replaced ones
+    assert len(resources) == 3
+    addresses = [r["address"] for r in resources]
+    assert "aws_s3_bucket.kept" in addresses
+    assert "aws_s3_bucket.replaced_standard" in addresses
+    assert "aws_s3_bucket.replaced_create_before_destroy" in addresses
+
+    # Verify replaced resources use their "after" values
+    replaced_standard = [r for r in resources if r["address"] == "aws_s3_bucket.replaced_standard"][0]
+    assert replaced_standard["values"]["bucket"] == "replacement-bucket"
+
+
 def test_get_resource_by_type(sample_resources):
     """Test filtering resources by type."""
     s3_resources = get_resource_by_type(sample_resources, "aws_s3_bucket")
@@ -211,3 +268,228 @@ def test_get_nested_property_complex():
     assert get_nested_property(obj, "versioning_configuration.0.status") == "Enabled"
     assert get_nested_property(obj, "tags.Environment") == "prod"
     assert get_nested_property(obj, "tags.Team") == "platform"
+
+
+# Tests for cross-resource reference extraction
+
+
+def test_extract_resource_references_basic():
+    """Test extracting basic resource references from plan."""
+    plan_data = {
+        "configuration": {
+            "root_module": {
+                "resources": [
+                    {
+                        "address": "aws_s3_bucket.example",
+                        "type": "aws_s3_bucket",
+                        "expressions": {
+                            "bucket": {"constant_value": "my-bucket"}
+                        }
+                    },
+                    {
+                        "address": "aws_s3_bucket_versioning.example",
+                        "type": "aws_s3_bucket_versioning",
+                        "expressions": {
+                            "bucket": {
+                                "references": ["aws_s3_bucket.example.id", "aws_s3_bucket.example"]
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    }
+
+    references = extract_resource_references(plan_data)
+
+    # Should map aws_s3_bucket.example -> [aws_s3_bucket_versioning.example]
+    assert "aws_s3_bucket.example" in references
+    assert "aws_s3_bucket_versioning.example" in references["aws_s3_bucket.example"]
+
+
+def test_extract_resource_references_multiple_dependents():
+    """Test extracting references when multiple resources reference the same target."""
+    plan_data = {
+        "configuration": {
+            "root_module": {
+                "resources": [
+                    {
+                        "address": "aws_s3_bucket.main",
+                        "expressions": {}
+                    },
+                    {
+                        "address": "aws_s3_bucket_versioning.main",
+                        "expressions": {
+                            "bucket": {"references": ["aws_s3_bucket.main.id"]}
+                        }
+                    },
+                    {
+                        "address": "aws_s3_bucket_public_access_block.main",
+                        "expressions": {
+                            "bucket": {"references": ["aws_s3_bucket.main.id"]}
+                        }
+                    },
+                    {
+                        "address": "aws_s3_bucket_server_side_encryption_configuration.main",
+                        "expressions": {
+                            "bucket": {"references": ["aws_s3_bucket.main"]}
+                        }
+                    }
+                ]
+            }
+        }
+    }
+
+    references = extract_resource_references(plan_data)
+
+    # All three resources should reference aws_s3_bucket.main
+    assert "aws_s3_bucket.main" in references
+    assert len(references["aws_s3_bucket.main"]) == 3
+    assert "aws_s3_bucket_versioning.main" in references["aws_s3_bucket.main"]
+    assert "aws_s3_bucket_public_access_block.main" in references["aws_s3_bucket.main"]
+    assert "aws_s3_bucket_server_side_encryption_configuration.main" in references["aws_s3_bucket.main"]
+
+
+def test_extract_resource_references_nested_expressions():
+    """Test extracting references from nested expression structures."""
+    plan_data = {
+        "configuration": {
+            "root_module": {
+                "resources": [
+                    {
+                        "address": "aws_lb_listener.https",
+                        "expressions": {
+                            "load_balancer_arn": {
+                                "references": ["aws_lb.main.arn"]
+                            },
+                            "default_action": [
+                                {
+                                    "target_group_arn": {
+                                        "references": ["aws_lb_target_group.app.arn"]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+    }
+
+    references = extract_resource_references(plan_data)
+
+    # Should extract both references
+    assert "aws_lb.main" in references
+    assert "aws_lb_listener.https" in references["aws_lb.main"]
+    assert "aws_lb_target_group.app" in references
+    assert "aws_lb_listener.https" in references["aws_lb_target_group.app"]
+
+
+def test_extract_resource_references_missing_configuration():
+    """Test extracting references when configuration section is missing."""
+    plan_data = {
+        "resource_changes": []
+    }
+
+    references = extract_resource_references(plan_data)
+
+    # Should return empty dict without error
+    assert references == {}
+
+
+def test_extract_resource_references_empty_references():
+    """Test handling resources with no references."""
+    plan_data = {
+        "configuration": {
+            "root_module": {
+                "resources": [
+                    {
+                        "address": "aws_s3_bucket.standalone",
+                        "expressions": {
+                            "bucket": {"constant_value": "my-bucket"}
+                        }
+                    }
+                ]
+            }
+        }
+    }
+
+    references = extract_resource_references(plan_data)
+
+    # Standalone resource should not appear in reference map
+    assert "aws_s3_bucket.standalone" not in references
+
+
+def test_extract_address_from_reference():
+    """Test extracting resource address from reference strings."""
+    # Basic resource reference with attribute
+    assert _extract_address_from_reference("aws_s3_bucket.example.id") == "aws_s3_bucket.example"
+
+    # Resource reference without attribute
+    assert _extract_address_from_reference("aws_s3_bucket.example") == "aws_s3_bucket.example"
+
+    # Module resource reference
+    assert _extract_address_from_reference("module.vpc.aws_subnet.private") == "module.vpc.aws_subnet.private"
+
+    # Module resource reference with attribute
+    assert _extract_address_from_reference("module.vpc.aws_subnet.private.id") == "module.vpc.aws_subnet.private"
+
+    # Empty string
+    assert _extract_address_from_reference("") == ""
+
+    # Invalid (too short)
+    assert _extract_address_from_reference("single") == ""
+
+
+def test_extract_constant_values():
+    """Test extracting constant values from plan configuration."""
+    plan_data = {
+        "configuration": {
+            "root_module": {
+                "resources": [
+                    {
+                        "address": "aws_s3_bucket.example",
+                        "expressions": {
+                            "bucket": {"constant_value": "my-bucket-123"},
+                            "force_destroy": {"constant_value": False}
+                        }
+                    },
+                    {
+                        "address": "aws_s3_bucket_versioning.example",
+                        "expressions": {
+                            "bucket": {"constant_value": "my-bucket-123"}
+                        }
+                    },
+                    {
+                        "address": "aws_s3_bucket_public_access_block.other",
+                        "expressions": {
+                            "bucket": {"references": ["aws_s3_bucket.other.id"]}
+                        }
+                    }
+                ]
+            }
+        }
+    }
+
+    constants = extract_constant_values(plan_data)
+
+    # Should extract constant values from first two resources
+    assert "aws_s3_bucket.example" in constants
+    assert constants["aws_s3_bucket.example"]["bucket"] == "my-bucket-123"
+    assert constants["aws_s3_bucket.example"]["force_destroy"] is False
+
+    assert "aws_s3_bucket_versioning.example" in constants
+    assert constants["aws_s3_bucket_versioning.example"]["bucket"] == "my-bucket-123"
+
+    # Third resource has no constant values (uses reference)
+    assert "aws_s3_bucket_public_access_block.other" not in constants
+
+
+def test_extract_constant_values_missing_configuration():
+    """Test extracting constant values when configuration is missing."""
+    plan_data = {"resource_changes": []}
+
+    constants = extract_constant_values(plan_data)
+
+    # Should return empty dict without error
+    assert constants == {}

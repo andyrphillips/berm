@@ -23,7 +23,8 @@ def load_terraform_plan(plan_path: str, _allow_absolute: bool = False) -> List[D
     """Load and parse a Terraform plan JSON file.
 
     Extracts resource changes from the plan and normalizes them for evaluation.
-    Only includes resources that are being created or updated (not deleted or no-op).
+    Only includes resources that are being created, updated, or replaced.
+    Excludes resources that are being deleted or unchanged (no-op).
 
     Args:
         plan_path: Path to Terraform plan JSON file (output of 'terraform show -json')
@@ -214,3 +215,214 @@ def get_nested_property(obj: Dict[str, Any], path: str) -> Any:
             return None
 
     return current
+
+
+def extract_resource_references(plan_data: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Extract resource references from Terraform plan configuration.
+
+    Parses the plan's configuration section to build a map of which resources
+    reference which other resources. This is used for cross-resource validation
+    to determine relationships between resources.
+
+    Args:
+        plan_data: Full Terraform plan JSON data (from terraform show -json)
+
+    Returns:
+        Dictionary mapping target resource addresses to list of dependent addresses:
+        {
+            "aws_s3_bucket.example": ["aws_s3_bucket_versioning.example_versioning"],
+            "aws_lb.main": ["aws_lb_listener.https"]
+        }
+
+    Examples:
+        If aws_s3_bucket_versioning.example has:
+            bucket = aws_s3_bucket.main.id
+
+        Then the result includes:
+            {"aws_s3_bucket.main": ["aws_s3_bucket_versioning.example"]}
+    """
+    reference_map: Dict[str, List[str]] = {}
+
+    # Navigate to configuration section
+    config = plan_data.get("configuration", {})
+    if not isinstance(config, dict):
+        return reference_map
+
+    root_module = config.get("root_module", {})
+    if not isinstance(root_module, dict):
+        return reference_map
+
+    config_resources = root_module.get("resources", [])
+    if not isinstance(config_resources, list):
+        return reference_map
+
+    # Process each resource configuration
+    for resource in config_resources:
+        if not isinstance(resource, dict):
+            continue
+
+        dependent_address = resource.get("address")
+        if not dependent_address:
+            continue
+
+        expressions = resource.get("expressions", {})
+        if not isinstance(expressions, dict):
+            continue
+
+        # Extract references from all expression properties
+        _extract_references_from_expressions(
+            expressions, dependent_address, reference_map
+        )
+
+    return reference_map
+
+
+def _extract_references_from_expressions(
+    expressions: Dict[str, Any],
+    dependent_address: str,
+    reference_map: Dict[str, List[str]],
+) -> None:
+    """Recursively extract references from expression objects.
+
+    Terraform expressions can contain 'references' arrays that list the resources
+    they depend on. This function traverses the expression tree to find all such
+    references.
+
+    Args:
+        expressions: Dictionary of expression objects from Terraform configuration
+        dependent_address: Address of the resource that contains these expressions
+        reference_map: Dictionary to populate with discovered references (modified in-place)
+    """
+    if not isinstance(expressions, dict):
+        return
+
+    for key, value in expressions.items():
+        if isinstance(value, dict):
+            # Check if this expression has a references array
+            if "references" in value and isinstance(value["references"], list):
+                for ref in value["references"]:
+                    if isinstance(ref, str):
+                        # Extract the target address from the reference
+                        # References can be like "aws_s3_bucket.example.id" or "aws_s3_bucket.example"
+                        target_address = _extract_address_from_reference(ref)
+                        if target_address:
+                            if target_address not in reference_map:
+                                reference_map[target_address] = []
+                            if dependent_address not in reference_map[target_address]:
+                                reference_map[target_address].append(dependent_address)
+
+            # Recursively process nested expressions
+            _extract_references_from_expressions(value, dependent_address, reference_map)
+
+        elif isinstance(value, list):
+            # Handle lists of expressions (e.g., for block resources)
+            for item in value:
+                if isinstance(item, dict):
+                    _extract_references_from_expressions(
+                        item, dependent_address, reference_map
+                    )
+
+
+def _extract_address_from_reference(reference: str) -> str:
+    """Extract resource address from a Terraform reference string.
+
+    Terraform references can include attribute access (e.g., .id, .arn).
+    This function strips the attribute portion to get the base resource address.
+
+    Args:
+        reference: Terraform reference string (e.g., "aws_s3_bucket.example.id")
+
+    Returns:
+        Resource address (e.g., "aws_s3_bucket.example")
+
+    Examples:
+        >>> _extract_address_from_reference("aws_s3_bucket.example.id")
+        "aws_s3_bucket.example"
+
+        >>> _extract_address_from_reference("aws_s3_bucket.example")
+        "aws_s3_bucket.example"
+
+        >>> _extract_address_from_reference("module.vpc.aws_subnet.private")
+        "module.vpc.aws_subnet.private"
+    """
+    if not reference:
+        return ""
+
+    # Split on dots
+    parts = reference.split(".")
+
+    # Need at least resource_type.resource_name (2 parts)
+    if len(parts) < 2:
+        return ""
+
+    # Common pattern: resource_type.resource_name.attribute
+    # We want to keep resource_type.resource_name
+    # But also handle module.name.resource_type.resource_name
+
+    # If starts with "module.", keep module.name.resource_type.resource_name
+    if parts[0] == "module":
+        # module.vpc.aws_subnet.private -> keep module.vpc.aws_subnet.private
+        # module.vpc.aws_subnet.private.id -> keep module.vpc.aws_subnet.private
+        if len(parts) >= 4:
+            return ".".join(parts[:4])
+        return reference
+
+    # Otherwise, assume format: resource_type.resource_name[.attribute]
+    # Keep only resource_type.resource_name
+    return ".".join(parts[:2])
+
+
+def extract_constant_values(plan_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Extract constant values from Terraform plan configuration.
+
+    Retrieves static/constant values from resource expressions, which are useful
+    for matching resources that use hardcoded values instead of dynamic references.
+
+    Args:
+        plan_data: Full Terraform plan JSON data (from terraform show -json)
+
+    Returns:
+        Dictionary mapping resource addresses to their constant values:
+        {
+            "aws_s3_bucket.example": {"bucket": "my-bucket-123"},
+            "aws_s3_bucket_versioning.example": {"bucket": "my-bucket-123"}
+        }
+    """
+    constant_map: Dict[str, Dict[str, Any]] = {}
+
+    # Navigate to configuration section
+    config = plan_data.get("configuration", {})
+    if not isinstance(config, dict):
+        return constant_map
+
+    root_module = config.get("root_module", {})
+    if not isinstance(root_module, dict):
+        return constant_map
+
+    config_resources = root_module.get("resources", [])
+    if not isinstance(config_resources, list):
+        return constant_map
+
+    # Process each resource configuration
+    for resource in config_resources:
+        if not isinstance(resource, dict):
+            continue
+
+        address = resource.get("address")
+        if not address:
+            continue
+
+        expressions = resource.get("expressions", {})
+        if not isinstance(expressions, dict):
+            continue
+
+        # Extract constant values from expressions
+        constants = {}
+        for key, value in expressions.items():
+            if isinstance(value, dict) and "constant_value" in value:
+                constants[key] = value["constant_value"]
+
+        if constants:
+            constant_map[address] = constants
+
+    return constant_map
